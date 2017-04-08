@@ -1,0 +1,710 @@
+---
+title: "HousingPrices_SagarShekharShrikant"
+author: "Sagar Vasekar"
+date: "March 30, 2017"
+output: 
+  html_document:
+      fig_height: 10
+      fig_width: 10
+      toc: yes
+
+---
+
+#Introduction:
+The dataset provided has overall 2919 observations with 80 variables constituting of 20 continuous, 23 nominal, 23 ordinal and 14 discrete variables and aim of this assignment is to predict the Sales price of individual residential property in Ames, Iowa. The two datasets available on Kaggle, are train and test which are representation of whole data spilt into 50% -50% into train and test set. Test set contains all the predictor variables in train set excluding target variable, SalePrice. This report aims at developing models on train set and issue predictions on test set by reporting out-of-sample performance. The explanation covers details and discussions on generalizability of model with low variance, act of balancing predictive performance and simplicity and to aim for maximum predictive power, while remaining alert to the danger of overfitting.
+
+Data Cleaning to account for missing values and inconsistencies :
+The dataset consists of 80 predictors variables which represent the type of information that a buyer would be interested in knowing about a potential property such as when was it built? How big is the lot? how many square feet of living space is in the dwelling? Is the basement furnished? How many bathrooms are there? The 20 continuous variables relate to various area dimensions for each observation such as typical lot size and total dwelling square foot etc.The 14 discrete variables quantify the number of items occurring within the house such as number of kitchens, bedrooms, and bathrooms etc.There are a large number of categorical variables(23 nominal and 23 ordinal) which range from 2 to 28 classes. The nominal variables identify various types of dwellings, garages, materials and environmental conditions while the ordinal variables typically rate various items within the property. SalePrice is the outcome variable of the dataset.
+
+Exploring the dataset reveals that for many variables like MasVnrType, Electrical, LotFrontage, MasVnrArea and GarageYrBlt had missigng values represnted by NA. Here, all the rows with NA values of the categorical variables are replaced with value of "zero" which could later be considered a level of factor variable. Also, NA values for the continuous variables were replaced by 0. Also variables like PoolQC, Fence, Alley,  MiscFeature, BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, FireplaceQu, GarageType, GarageFinish, GarageQual and GarageCond had are values "NA" as an option for the type of category represented. These NA values could be changed to "zero" so that the system would not consider them as NA values.
+
+
+```{r Setup, include=FALSE, warning=FALSE}
+setwd("C:/Users/sagar/Desktop/Stats and Predictive Analytics/Project")
+
+train_org <- read.csv("train.csv")
+test <- read.csv("test.csv")
+
+train <- train_org
+library(ggplot2) # Data visualization
+library(readr) # CSV file I/O, e.g. the read_csv function
+library(MASS)
+library(dplyr)
+library(lars)
+library(moments)
+library(caret)
+library(corrplot)
+library(matrixStats)
+library(rminer)
+library(gbm)
+library(RCurl)
+library(data.table)
+library(testthat)
+library(gridExtra)
+library(GGally)
+
+
+rmse <- function(actVal, predVal) {
+  sqrt(mean((actVal - predVal)^2))
+}
+
+R2 <- function(y, yhat, ybar, digits = 2) {
+  round(1 - sum((y - yhat)^2)/sum((y - ybar)^2), digits)
+}
+
+```
+
+
+# Data Exploration
+
+```{r Data Exploration, warning=FALSE}
+
+train_temp <- train
+test_temp <- test
+test_temp$SalePrice <- rep(NA, 1459)
+
+df <- rbind(train_temp, test_temp)
+str(df)
+
+# The training data contain 1460 observations and 81 features. 
+str(train)
+dim(train)
+
+# Looking at the distribution and summary of the target variable
+summary(train$SalePrice)
+quantile(train$SalePrice)
+
+# From summary, it was observed that minimum price is greater than 0.
+
+# Histogram for target variable
+hist(train$SalePrice)
+
+# From Histogram, we could see that it deviates from normal distribution and has positive skewness
+
+```
+
+On exploring Target Variables,  we can see that it's right skewed. Therefore, we can take the logarithmic transformation of it.
+
+## Categorizing the data
+
+```{r Categorizing the data}
+# Understanding the structure of dataset
+getDoc <- getURL("https://ww2.amstat.org/publications/jse/v19n3/decock/DataDocumentation.txt")
+
+# splitting the text file to strings:
+getDoc <- unlist(strsplit(getDoc, "[ \n()]+"))
+
+# Grouping into Nominal, Ordinal, Discrete and Continous variables
+grep.type <- grep("Nominal|Ordinal|Discrete|Continuous", getDoc, value = T)
+
+# arrange in a data.frame (ignoring the first elemet which relates to the observation index):
+variables <- data.frame(name = names(train), type = grep.type[2:82])
+
+continuous <- as.character(variables[variables$type == "Continuous",1])
+discretes <- as.character(variables[variables$type == "Discrete",1])
+nominals <- as.character(variables[variables$type == "Nominal",1])
+nominals <- nominals[2:24] # Removing ID
+ordinals <- as.character(variables[variables$type == "Ordinal",1])
+
+# first 10 variables' types
+head(variables, 10)
+
+```
+
+On categorizing the data as Continous, Discrete, Nominal and Ordinal, we can see the distribution as below:
+Continous Variables: 20
+Discrete Variables : 14
+Nominal Variables  : 23
+Ordinal Variables  : 23
+
+## Missing Data Understanding
+
+```{r Missing Data Understanding, warning=FALSE}
+
+train_plot <- fread('train.csv',colClasses=c('MiscFeature' = "character", 'PoolQC' = 'character', 'Alley' = 'character'))
+test_plot <- fread('test.csv' ,colClasses=c('MiscFeature' = "character", 'PoolQC' = 'character', 'Alley' = 'character'))
+
+varsNAShare <- sapply(train, function(x) mean(is.na(x)))
+
+variables$na.share <- varsNAShare
+
+variables$na.exist <- varsNAShare > 0
+
+par(mfrow = c(1,1))
+
+na.table <- filter(variables, na.exist == T) %>% arrange(-na.share)
+
+# Plotting the NA values share
+ggplot(data = na.table,
+       aes(x = factor(name, levels = na.table$name),
+           y = na.share)) +
+  geom_bar(stat = "identity") + 
+  coord_flip() +
+  labs(title = "Share of NA values", x = "", y = "")
+
+
+newtrain <- setDT(train)
+df_cor <- data.frame(newtrain)
+
+# Seperating categorical variables and numerical variables
+
+cat_var <- names(newtrain)[which(sapply(newtrain, is.character))]
+cat_var
+
+numeric_var <- names(newtrain)[which(sapply(newtrain, is.numeric))]
+numeric_var
+
+# Creating categorical and continous as 2 different data frames
+
+housing_cat <- newtrain[,.SD, .SDcols = cat_var]
+housing_cont <- newtrain[,.SD,.SDcols = numeric_var]
+
+#Number of NA values in each column
+colSums(sapply(newtrain, is.na))
+
+# colSums(sapply(newtrain[,.SD, .SDcols = cat_var], is.na))
+
+# colSums(sapply(newtrain[,.SD, .SDcols = numeric_var], is.na))
+
+correlations <- cor(na.omit(housing_cont[,-1, with = FALSE]))
+
+# correlations
+row_indic <- apply(correlations, 1, function(x) sum(x > 0.3 | x < -0.3) > 1)
+
+correlations<- correlations[row_indic ,row_indic ]
+corrplot(correlations, method="square")
+
+sapply(df[,1:80], function(x) sum(is.na(x)))
+
+```
+
+## Understanding Categorical & Numerical Features
+```{r Understanding Categorical & Numerical Features}
+
+cat_var <- names(train_plot)[which(sapply(train_plot, is.character))]
+
+numeric_var <- names(train_plot)[which(sapply(train_plot, is.numeric))]
+
+train_cat <- train_plot[,.SD, .SDcols = cat_var]
+train_cont <- train_plot[,.SD,.SDcols = numeric_var]
+
+plotHist <- function(data_in, i) {
+  data <- data.frame(x=data_in[[i]])
+  p <- ggplot(data=data, aes(x=factor(x))) + stat_count() + xlab(colnames(data_in)[i]) + theme_light() + 
+    theme(axis.text.x = element_text(angle = 90, hjust =1))
+  return (p)
+}
+
+doPlots <- function(data_in, fun, ii, ncol=3) {
+  pp <- list()
+  for (i in ii) {
+    p <- fun(data_in=data_in, i=i)
+    pp <- c(pp, list(p))
+  }
+  do.call("grid.arrange", c(pp, ncol=ncol))
+}
+
+plotDen <- function(data_in, i){
+  data <- data.frame(x=data_in[[i]], SalePrice = data_in$SalePrice)
+  p <- ggplot(data= data) + geom_line(aes(x = x), stat = 'density', size = 1,alpha = 1.0) +
+    xlab(paste0((colnames(data_in)[i]), '\n', 'Skewness: ',round(skewness(data_in[[i]], na.rm = TRUE), 2))) + theme_light() 
+  return(p)
+   
+}
+
+doPlots(train_cat, fun = plotHist, ii = 1:4, ncol = 2)
+doPlots(train_cat, fun = plotHist, ii  = 4:8, ncol = 2)
+doPlots(train_cat, fun = plotHist, ii = 8:12, ncol = 2)
+doPlots(train_cat, fun = plotHist, ii = 13:18, ncol = 2)
+doPlots(train_cat, fun = plotHist, ii = 18:22, ncol = 2)
+
+# Density plots for numeric variables
+doPlots(train_cont, fun = plotDen, ii = 2:6, ncol = 2)
+doPlots(train_cont, fun = plotDen, ii = 7:12, ncol = 2)
+doPlots(train_cont, fun = plotDen, ii = 13:17, ncol = 2)
+```
+
+# Data Processing
+
+Now that we know there's a lot of missing data in out sets, let's combine the training set and testing set and proceed with the missing values imputation.
+
+```{r Data Processing}
+
+# Plotting 'GrLivArea' too see if there are any outliers
+ggplot(train,aes(y=SalePrice,x=GrLivArea))+geom_point()
+
+# There are outliers in 'GrLivArea' field. Let's remove those outliers.
+train <- train[train$GrLivArea<=4000,]
+
+# Taking all the missing data indices in one variables. It will hold all the variables details where missing data is present.
+Missing_indices <- sapply(train,function(x)sum(is.na(x)))
+Missing_Summary <- data.frame(index = names(train),Missing_Values=Missing_indices)
+Missing_Summary[Missing_Summary$Missing_Values > 0,]
+
+#combining train and test data for quicker data prep
+test$SalePrice <- NA
+train$isTrain <- 1
+test$isTrain <- 0
+combined <- rbind(train,test)
+
+combined$MasVnrArea[which(is.na(combined$MasVnrArea))] <- mean(combined$MasVnrArea,na.rm=T)
+```
+
+
+## Alley
+```{r Alley}
+# Changing NA in Alley to None
+combined$Alley1 <- as.character(combined$Alley)
+combined$Alley1[which(is.na(combined$Alley))] <- "None"
+table(combined$Alley1)
+combined$Alley <- as.factor(combined$Alley1)
+combined <- subset(combined,select = -Alley1)
+```
+
+## MasVnrType
+```{r MasVnrType}
+# Changing NA in MasVnrType to None
+combined$MasVnrType1 <- as.character(combined$MasVnrType)
+combined$MasVnrType1[which(is.na(combined$MasVnrType))] <- "None"
+combined$MasVnrType <- as.factor(combined$MasVnrType1)
+combined <- subset(combined,select = -MasVnrType1)
+table(combined$MasVnrType)
+# Imputing missing Lot Frontage by the median
+combined$LotFrontage[which(is.na(combined$LotFrontage))] <- median(combined$LotFrontage,na.rm = T)
+```
+
+## FireplaceQu
+```{r FireplaceQu}
+# Changing NA in FireplaceQu to None
+combined$FireplaceQu1 <- as.character(combined$FireplaceQu)
+combined$FireplaceQu1[which(is.na(combined$FireplaceQu))] <- "None"
+combined$FireplaceQu <- as.factor(combined$FireplaceQu1)
+combined <- subset(combined,select = -FireplaceQu1)
+```
+
+## PoolQC
+```{r PoolQC}
+# Changing NA in PoolQC to None
+combined$PoolQC1 <- as.character(combined$PoolQC)
+combined$PoolQC1[which(is.na(combined$PoolQC))] <- "None"
+combined$PoolQC <- as.factor(combined$PoolQC1)
+combined <- subset(combined,select = -PoolQC1)
+```
+
+## Fence
+```{r Fence}
+# Changing NA in Fence to None
+combined$Fence1 <- as.character(combined$Fence)
+combined$Fence1[which(is.na(combined$Fence))] <- "None"
+combined$Fence <- as.factor(combined$Fence1)
+combined <- subset(combined,select = -Fence1)
+```
+
+## MiscFeature
+```{r MiscFeature}
+# Changing NA in MiscFeature to None
+combined$MiscFeature1 <- as.character(combined$MiscFeature)
+combined$MiscFeature1[which(is.na(combined$MiscFeature))] <- "None"
+combined$MiscFeature <- as.factor(combined$MiscFeature1)
+combined <- subset(combined,select = -MiscFeature1)
+```
+
+## GarageType
+```{r GarageType}
+#Changing NA in GarageType to None
+combined$GarageType1 <- as.character(combined$GarageType)
+combined$GarageType1[which(is.na(combined$GarageType))] <- "None"
+combined$GarageType <- as.factor(combined$GarageType1)
+combined <- subset(combined,select = -GarageType1)
+```
+
+## GarageYrBlt
+```{r GarageYrBlt}
+# Changing NA in GarageYrBlt to None
+combined$GarageYrBlt[which(is.na(combined$GarageYrBlt))] <- 0 
+```
+
+## GarageFinish
+```{r GarageFinish}
+# Changing NA in GarageFinish to None
+combined$GarageFinish1 <- as.character(combined$GarageFinish)
+combined$GarageFinish1[which(is.na(combined$GarageFinish))] <- "None"
+combined$GarageFinish <- as.factor(combined$GarageFinish1)
+combined <- subset(combined,select = -GarageFinish1)
+```
+
+## GarageQual
+```{r GarageQual}
+# Changing NA in GarageQual to None
+combined$GarageQual1 <- as.character(combined$GarageQual)
+combined$GarageQual1[which(is.na(combined$GarageQual))] <- "None"
+combined$GarageQual <- as.factor(combined$GarageQual1)
+combined <- subset(combined,select = -GarageQual1)
+```
+
+## GarageCond
+```{r GarageCond}
+# Changing NA in GarageCond to None
+combined$GarageCond1 <- as.character(combined$GarageCond)
+combined$GarageCond1[which(is.na(combined$GarageCond))] <- "None"
+combined$GarageCond <- as.factor(combined$GarageCond1)
+combined <- subset(combined,select = -GarageCond1)
+```
+
+## BsmtQual
+```{r BsmtQual}
+# Changing NA in BsmtQual to None
+combined$BsmtQual1 <- as.character(combined$BsmtQual)
+combined$BsmtQual1[which(is.na(combined$BsmtQual))] <- "None"
+combined$BsmtQual <- as.factor(combined$BsmtQual1)
+combined <- subset(combined,select = -BsmtQual1)
+```
+
+## BsmtCond
+```{r BsmtCond}
+# Changing NA in BsmtCond to None
+combined$BsmtCond1 <- as.character(combined$BsmtCond)
+combined$BsmtCond1[which(is.na(combined$BsmtCond))] <- "None"
+combined$BsmtCond <- as.factor(combined$BsmtCond1)
+combined <- subset(combined,select = -BsmtCond1)
+```
+
+## BsmtExposure
+```{r BsmtExposure}
+# Changing NA in BsmtExposure to None
+combined$BsmtExposure1 <- as.character(combined$BsmtExposure)
+combined$BsmtExposure1[which(is.na(combined$BsmtExposure))] <- "None"
+combined$BsmtExposure <- as.factor(combined$BsmtExposure1)
+combined <- subset(combined,select = -BsmtExposure1)
+```
+
+## BsmtFinType1
+```{r BsmtFinType1}
+# Changing NA in BsmtFinType1 to None
+combined$BsmtFinType11 <- as.character(combined$BsmtFinType1)
+combined$BsmtFinType11[which(is.na(combined$BsmtFinType1))] <- "None"
+combined$BsmtFinType1 <- as.factor(combined$BsmtFinType11)
+combined <- subset(combined,select = -BsmtFinType11)
+```
+
+## BsmtFinType2
+```{r BsmtFinType2}
+# Changing NA in BsmtFinType2 to None
+combined$BsmtFinType21 <- as.character(combined$BsmtFinType2)
+combined$BsmtFinType21[which(is.na(combined$BsmtFinType2))] <- "None"
+combined$BsmtFinType2 <- as.factor(combined$BsmtFinType21)
+combined <- subset(combined,select = -BsmtFinType21)
+```
+
+## Electrical
+```{r Electrical}
+# Changing NA in Electrical to None
+combined$Electrical1 <- as.character(combined$Electrical)
+combined$Electrical1[which(is.na(combined$Electrical))] <- "None"
+combined$Electrical <- as.factor(combined$Electrical1)
+combined <- subset(combined,select = -Electrical1)
+```
+
+## Removing Skewed Variables
+There are few variables which are highly skewed as compared to others in both training and testing data. 
+Therefore, we've taken logarithmic transoformation of all the variables where skew value is greater than 0.75
+```{r Removing Skewed Variables, warning=FALSE}
+levels(combined$MSZoning) <- c(levels(combined$MSZoning),"None")
+levels(combined$Utilities) <- c(levels(combined$Utilities),"None","NoSeWa")
+levels(combined$Exterior1st) <- c(levels(combined$Exterior1st),"None","ImStucc","Stone")
+levels(combined$Exterior2nd) <- c(levels(combined$Exterior2nd),"None","Other")
+levels(combined$KitchenQual) <- c(levels(combined$KitchenQual),"None")
+levels(combined$Functional) <- c(levels(combined$Functional),"None")
+levels(combined$SaleType) <- c(levels(combined$SaleType),"None")
+
+# Taking all the column classes in one variable so as to seperate factors from numerical variables
+Column_classes <- sapply(names(combined),function(x){class(combined[[x]])})
+numeric_columns <-names(Column_classes[Column_classes != "factor"])
+
+#determining skew of each numric variable
+skew <- sapply(numeric_columns,function(x){skewness(combined[[x]],na.rm = T)})
+
+# Let us determine a threshold skewness and transform all variables above the treshold.
+skew <- skew[skew > 0.75]
+
+# transform excessively skewed features with log(x + 1)
+for(x in names(skew)) {
+  combined[[x]] <- log(combined[[x]] + 1)
+}
+
+train <- combined[combined$isTrain==1,]
+table(train$MasVnrType)
+test <- combined[combined$isTrain==0,]
+smp_size <- floor(0.75 * nrow(train))
+
+```
+
+# Experimenting with Machine Learning Algorithms
+
+## Model 1: Linear Model
+```{r Linear Models, warning=FALSE}
+myControl = trainControl(method = "cv", number = 5, verboseIter = FALSE)
+model_lm = train(SalePrice ~ ., 
+              data = train,
+              method = "lm",
+              trControl = myControl)
+model_lm
+```
+
+
+## Model 2: Random Forest
+```{r Random Forest, warning=FALSE}
+model_rf = train(SalePrice ~ ., 
+              data = train,
+              tuneLength = 1,
+              method = "ranger",
+              importance = 'impurity',
+              trControl = myControl)
+
+
+model_rf
+
+```
+
+## Model 3: Random Forest with two mtry values
+```{r Random Forest with two mtry values, warning=FALSE}
+model_rf2 = train(SalePrice ~ ., 
+                 data = train,
+                 tuneLength = 2,
+                 method = "ranger",
+                 importance = 'impurity',
+                 trControl = myControl)
+model_rf2
+```
+
+## Model 4: Random Forest with 20 most important variables}
+```{r Random Forest with 20 most important variables, warning=FALSE}
+
+varImp(model_rf)
+
+Top20Variables = c("OverallQual", "GrLivArea", "TotalBsmtSF", "GarageArea", "GarageCars", 
+                   "X1stFlrSF", "YearBuilt", "ExterQual", "BsmtFinSF1", "FullBath",
+                   "KitchenQual", "LotArea", "Fireplaces",
+                   "FireplaceQu", "YearRemodAdd", "GarageYrBlt", "X2ndFlrSF", 
+                   "TotRmsAbvGrd", "MasVnrArea", "LotFrontage")
+
+train_Top20Var = select(train, one_of(Top20Variables, "SalePrice"))
+
+model_rf_Top20 = train(SalePrice ~ ., 
+                  data = train_Top20Var,
+                  tuneLength = 1,
+                  method = "ranger",
+                  importance = 'impurity',
+                  trControl = myControl)
+
+model_rf_Top20
+```
+
+## Model 5 - support vector machine
+```{r SVM, warning=FALSE}
+model_svm2 = train(SalePrice ~ ., 
+                   data = train,
+                   tuneLength = 3,
+                   method = "svmLinear",
+                   trControl = myControl)
+
+model_svm2
+```
+
+## Model 6 - neural network
+```{r Neural Network, warning=FALSE}
+model_nnet1 = train(SalePrice ~ ., 
+                  data = train,
+                  method = "nnet",
+                  trControl = myControl)
+
+model_nnet1
+```
+
+## Model 7 - KNN
+```{r}
+model_knn = train(SalePrice ~ ., 
+                  data = train,
+                  method = "knn",
+                  trControl = myControl)
+
+model_knn
+```
+
+## Model 8: stochastic gradient boosting machine with custom tuning grid
+We have used three mtry values and a custom tuning grid. 
+```{r stochastic gradient boosting machine with custom tuning grid, warning=FALSE}
+gbmTuningGrid = expand.grid(interaction.depth = 4, 
+                            n.trees = c(50, 100, 150, 200), 
+                            shrinkage = 0.3,
+                            n.minobsinnode = 20)
+
+model_gbm2 = train(SalePrice ~ ., 
+                  data = train,
+                  tuneLength = 3,
+                  method = "gbm",
+                  trControl = myControl,
+                  tuneGrid = gbmTuningGrid)
+
+model_gbm2
+```
+
+## Model 9: extreme gradient boosting
+
+The extreme gradient boosting algorithm works much the same as the stochastic gradient boosting machine, but **more aggresively guards against overfitting.**
+
+It's far easier to use extreme gradient boosting in the caret package rather than the xgboost package because the latter requires the training and test sets to be converted to sparse matrices using the concept of one-hot encoding.
+
+Used all available explanatory variables and three mtry values.
+
+```{r extreme gradient boosting}
+xgbTuningGrid = expand.grid(nrounds = c(50, 100), 
+                            lambda = seq(0.1, 0.5, 0.1), 
+                            alpha = seq(0.1, 0.5, 0.1),
+                            eta = c(0.3, 0.4))
+
+model_xgb4 = train(SalePrice ~ ., 
+                   data = train,
+                   tuneLength = 3,
+                   method = "xgbLinear",
+                   trControl = myControl,
+                   tuneGrid = xgbTuningGrid)
+
+model_xgb4
+```
+
+
+```{r Test Data Processing, warning=FALSE}
+
+Missing_indices <- sapply(test,function(x)sum(is.na(x)))
+Missing_Summary <- data.frame(index = names(test),Missing_Values=Missing_indices)
+Missing_Summary[Missing_Summary$Missing_Values > 0,]
+
+# Changing NAs to "None" or 0
+test$MSZoning1 <- as.character(test$MSZoning)
+test$MSZoning1[which(is.na(test$MSZoning))] <- "None"
+test$MSZoning <- as.factor(test$MSZoning1)
+test <- subset(test,select = -MSZoning1)
+
+test$Utilities1 <- as.character(test$Utilities)
+test$Utilities1[which(is.na(test$Utilities))] <- "None"
+test$Utilities <- as.factor(test$Utilities1)
+test <- subset(test,select = -Utilities1)
+
+test$Exterior1st1 <- as.character(test$Exterior1st)
+test$Exterior1st1[which(is.na(test$Exterior1st))] <- "None"
+test$Exterior1st <- as.factor(test$Exterior1st1)
+test <- subset(test,select = -Exterior1st1)
+
+test$Exterior2nd1 <- as.character(test$Exterior2nd)
+test$Exterior2nd1[which(is.na(test$Exterior2nd))] <- "None"
+test$Exterior2nd <- as.factor(test$Exterior2nd1)
+test <- subset(test,select = -Exterior2nd1)
+
+test$BsmtFinSF1[which(is.na(test$BsmtFinSF1))] <- 0
+test$BsmtFinSF2[which(is.na(test$BsmtFinSF2))] <- 0
+test$TotalBsmtSF[which(is.na(test$TotalBsmtSF))] <- 0
+test$BsmtUnfSF[which(is.na(test$BsmtUnfSF))] <- 0
+test$BsmtFullBath[which(is.na(test$BsmtFullBath))] <- 0
+test$BsmtHalfBath[which(is.na(test$BsmtHalfBath))] <- 0
+
+test$KitchenQual1 <- as.character(test$KitchenQual)
+test$KitchenQual1[which(is.na(test$KitchenQual))] <- "None"
+test$KitchenQual <- as.factor(test$KitchenQual1)
+test <- subset(test,select = -KitchenQual1)
+
+test$Functional1 <- as.character(test$Functional)
+test$Functional1[which(is.na(test$Functional))] <- "None"
+test$Functional <- as.factor(test$Functional1)
+test <- subset(test,select = -Functional1)
+
+test$GarageCars[which(is.na(test$GarageCars))] <- 0
+test$GarageArea[which(is.na(test$GarageArea))] <- 0
+
+test$SaleType1 <- as.character(test$SaleType)
+test$SaleType1[which(is.na(test$SaleType))] <- "None"
+test$SaleType <- as.factor(test$SaleType1)
+test <- subset(test,select = -SaleType1)
+```
+
+## Model 10: Regularized Linear Regression
+
+glmnet uses a combination of lasso regression (penalising the number of non-zero coefficients) and ridge regression (penalising the absolute magnitude of each coefficient) to prevent overfitting when building a generalised linear model.
+
+
+```{r Regularized Linear Model, warning=FALSE}
+
+#myTrainControl <- trainControl(method="repeatedcv",number=10,repeats = 4)
+myTrainControl = trainControl(method = "cv", number = 5, verboseIter = FALSE)
+fit.glmnet <- train(SalePrice~.-Id-isTrain,train,trControl = myTrainControl,
+                    method="glmnet",tuneGrid=expand.grid(.alpha = seq(0,1,by=0.05), 
+                                                         .lambda = seq(0, 0.08, by = 0.01)))
+
+myTrainControl <- trainControl(method="repeatedcv",number=10,repeats = 4)
+fit.glmnet2 <- train(SalePrice~.-Id-isTrain,train,trControl = myTrainControl,
+                    method="glmnet",tuneGrid=expand.grid(.alpha = seq(0,1,by=0.05), 
+                                                         .lambda = seq(0, 0.08, by = 0.01)))
+
+
+print(fit.glmnet)
+
+varImp(fit.glmnet)
+
+```
+
+# Models Comparison
+```{r Models Comparison}
+model_list = list(LM = model_lm, RF = model_rf, RF2 = model_rf2, RF_TOP20 = model_rf_Top20, SVM = model_svm2, NNET = model_nnet1, XGB = model_xgb4, KNN = model_knn, GBM = model_gbm2, GLMNET = fit.glmnet)
+resamples = resamples(model_list)
+summary(resamples)
+bwplot(resamples, metric = "RMSE")
+rm(resamples, model_list)
+```
+
+As we can see on comparing all 11 models that we tried, regularised regression model offers the best values for RMSE and R2 out of all. Therefore, our best performing model is Regularized Linear Model.
+
+Predictions based on best performing model(Regularized Linear Model)
+
+# Final Prediction and Submission
+```{r Final Submission and Prediction}
+log_prediction <- predict(fit.glmnet2,newdata=test)
+actual_pred <- exp(log_prediction)-1
+hist(actual_pred)
+submit <- data.frame(Id=test$Id,SalePrice=actual_pred)
+write.csv(submit,file="NewSubmission.csv",row.names=F)
+
+# Plotting the best performing model
+plot(fit.glmnet)
+
+```
+
+# Testing RMSE and R2
+Since we have already used cross-validation on training set before, we have utilised split-evaluation to get the testing RMSE and R2 values.
+
+```{r Testing RMSE and R2}
+
+set.seed(100)
+inTrain <- createDataPartition(train$SalePrice, p=0.7, list=FALSE)
+
+str(inTrain)
+inTrain
+
+saleTrain <- train[inTrain,]
+saleTest <- train[-inTrain,]
+
+myTrainControl = trainControl(method = "cv", number = 5, verboseIter = FALSE)
+fit.glmnet <- train(SalePrice~.-Id,saleTrain,trControl = myTrainControl,
+                    method="glmnet",tuneGrid=expand.grid(.alpha = seq(0,1,by=0.05), 
+                                                         .lambda = seq(0, 0.08, by = 0.01)))
+
+predicted <- predict(fit.glmnet, saleTest)
+mmetric(saleTest$SalePrice, predicted, metric=c("RMSE","R2"))
+
+```
+
+# Outcome
+Test RMSE   : 0.1058
+Test R2     : 0.92
+Kaggle Score: 0.12112
+Kaggle Rank : 687
+
